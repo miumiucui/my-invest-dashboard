@@ -22,18 +22,29 @@ def _default_series():
     return pd.Series([0.0], index=[pd.Timestamp.today().normalize()])
 
 
+def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """解决 yfinance 多重索引表头，统一为单层列名以便用 Close/Volume 取列."""
+    if df is None:
+        return df
+    if isinstance(df.columns, pd.MultiIndex):
+        df = df.copy()
+        df.columns = df.columns.get_level_values(0)
+    return df
+
+
 @st.cache_data(ttl=3600)
 def get_btc_data():
     """单独下载 BTC：返回 (收盘价序列, 成交量序列)。使用 Close/Volume 列名，auto_adjust=False 保证列名一致."""
     try:
         df = yf.download("BTC-USD", period=PERIOD, auto_adjust=False, progress=False, threads=False)
-        if df is None or df.empty or "Close" not in df.columns:
+        df = _flatten_columns(df)
+        if df is None or (hasattr(df, "empty") and df.empty) or "Close" not in df.columns:
             return _default_series(), _default_series()
         close = df["Close"].dropna()
         vol = df["Volume"].dropna()
-        if len(close) == 0:
+        if close.empty:
             close = _default_series()
-        if len(vol) == 0:
+        if vol.empty:
             vol = _default_series()
         return close, vol
     except Exception:
@@ -44,10 +55,11 @@ def _download_ticker_close(ticker: str) -> pd.Series:
     """下载单只股票的收盘价。使用 Close 列，auto_adjust=False 确保列名不变."""
     try:
         df = yf.download(ticker, period=PERIOD, auto_adjust=False, progress=False, threads=False)
-        if df is None or df.empty or "Close" not in df.columns:
+        df = _flatten_columns(df)
+        if df is None or (hasattr(df, "empty") and df.empty) or "Close" not in df.columns:
             return _default_series()
         close = df["Close"].dropna()
-        return close if len(close) > 0 else _default_series()
+        return close if not close.empty else _default_series()
     except Exception:
         return _default_series()
 
@@ -66,10 +78,10 @@ def get_aapl():
 def get_amzn():
     return _download_ticker_close("AMZN")
 def pct_change(series: pd.Series) -> float | None:
-    if series is None or len(series) < 2:
+    if series is None or series.empty or len(series) < 2:
         return None
-    prev = series.iloc[-2]
-    cur = series.iloc[-1]
+    prev = float(series.iloc[-2])
+    cur = float(series.iloc[-1])
     if pd.isna(prev) or prev == 0:
         return None
     return (cur / prev - 1) * 100.0
@@ -84,19 +96,19 @@ try:
     aapl_p = get_aapl()
     amzn_p = get_amzn()
 
-    # 任一标的失败时已用默认单行序列，不再整页 st.stop()；仅保证有数据可做 iloc[-1]
-    if len(btc_p) == 0:
+    # 任一标的失败时已用默认单行序列，不再整页 st.stop()；用 .empty 判断避免 Series 歧义
+    if btc_p.empty:
         btc_p = _default_series()
-    if len(tsla_p) == 0:
+    if tsla_p.empty:
         tsla_p = _default_series()
-    if len(aapl_p) == 0:
+    if aapl_p.empty:
         aapl_p = _default_series()
-    if len(amzn_p) == 0:
+    if amzn_p.empty:
         amzn_p = _default_series()
 
     # 对齐成交量到 BTC 收盘价索引（同一次 BTC 下载，索引一致）
     btc_volume = btc_volume.reindex(btc_p.index).dropna()
-    if len(btc_volume) == 0:
+    if btc_volume.empty:
         btc_volume = pd.Series(dtype=float)
     # --- 3. 自动指标计算 (BTC) ---
     # 因子 5: RSI (14天)
@@ -111,7 +123,7 @@ try:
     vol_signal = False
     current_vol = None
     avg_vol_30 = None
-    if len(btc_volume) > 0 and len(btc_volume) >= 30:
+    if not btc_volume.empty and len(btc_volume) >= 30:
         current_vol = float(btc_volume.iloc[-1])
         avg_vol_30 = float(btc_volume.rolling(window=30).mean().iloc[-1])
         vol_signal = current_vol < avg_vol_30
@@ -136,7 +148,7 @@ try:
     if lth_rising:
         score += 1
         active_factors.append("LTH 持有占比上升 (筹码整合)")
-    # --- 5. 第一行：多资产实时价格看板 ---
+    # --- 5. 第一行：多资产实时价格看板（显式 .iloc[-1] 并转为标量）---
     btc_last = float(btc_p.iloc[-1])
     tsla_last = float(tsla_p.iloc[-1])
     aapl_last = float(aapl_p.iloc[-1])
@@ -147,8 +159,11 @@ try:
     btc_change = pct_change(btc_p)
 
     def _delta_label(series: pd.Series, pct: float | None, fmt: str) -> str:
-        """下载失败时（默认单行 0）显示「数据暂缺」."""
-        if len(series) == 1 and (series.iloc[-1] == 0 or pd.isna(series.iloc[-1])):
+        """下载失败时（默认单行 0）显示「数据暂缺」；用标量比较避免 Series 歧义."""
+        if series.empty:
+            return "数据暂缺"
+        last_val = float(series.iloc[-1])
+        if len(series) == 1 and (last_val == 0 or pd.isna(last_val)):
             return "数据暂缺"
         return fmt(pct) if pct is not None else "N/A"
 
@@ -189,8 +204,10 @@ try:
             )
     with col_right:
         st.subheader("📊 TSLA 价格 / MA200 / 持仓成本线")
-        if len(tsla_p) == 1 and (tsla_p.iloc[-1] == 0 or pd.isna(tsla_p.iloc[-1])):
-            st.caption("TSLA 数据暂缺，请检查网络后刷新。")
+        if not tsla_p.empty and len(tsla_p) == 1:
+            tsla_last_val = float(tsla_p.iloc[-1])
+            if tsla_last_val == 0 or pd.isna(tsla_last_val):
+                st.caption("TSLA 数据暂缺，请检查网络后刷新。")
         # 计算 TSLA MA200（550 天数据足够，保证不为 NaN）
         tsla_ma200 = tsla_p.rolling(window=200).mean()
         fig = go.Figure()
