@@ -38,11 +38,26 @@ def format_pct(x: float | None) -> str:
     return f"{x:+.2f}%"
 try:
     prices, btc_volume = get_all_data()
+
+    # 数据为空时显示警告，避免后续 iloc 越界
+    if prices is None or (hasattr(prices, "empty") and prices.empty):
+        st.warning("⚠️ 价格数据未获取到或为空，请检查网络后刷新页面。")
+        st.stop()
+    if btc_volume is None or (hasattr(btc_volume, "empty") and btc_volume.empty):
+        st.warning("⚠️ BTC 成交量数据未获取到或为空，请检查网络后刷新页面。")
+        st.stop()
+
     # 提取各标的价格
     btc_p = prices["BTC-USD"].dropna()
     tsla_p = prices["TSLA"].dropna()
     aapl_p = prices["AAPL"].dropna()
     amzn_p = prices["AMZN"].dropna()
+
+    # 确保各序列至少有 1 条数据再执行 iloc[-1]
+    if len(btc_p) == 0 or len(tsla_p) == 0 or len(aapl_p) == 0 or len(amzn_p) == 0:
+        st.warning("⚠️ 部分标的数据为空，请稍后重试。")
+        st.stop()
+
     # 对齐成交量到 BTC 收盘价格索引
     btc_volume = btc_volume.loc[btc_p.index]
     # --- 3. 自动指标计算 (BTC) ---
@@ -58,7 +73,7 @@ try:
     vol_signal = False
     current_vol = None
     avg_vol_30 = None
-    if len(btc_volume) >= 30:
+    if len(btc_volume) > 0 and len(btc_volume) >= 30:
         current_vol = float(btc_volume.iloc[-1])
         avg_vol_30 = float(btc_volume.rolling(window=30).mean().iloc[-1])
         vol_signal = current_vol < avg_vol_30
